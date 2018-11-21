@@ -1,14 +1,16 @@
 FROM golang:1.11-alpine as build
 
+RUN apk add --no-cache git mercurial
+
 COPY . /ipfs-proxy
 
-RUN cd /ipfs-proxy && env GOBIN=/usr/local/bin go install -tags netgo
+RUN cd /ipfs-proxy && go build -tags netgo
 
-FROM ipfs/go-ipfs
+FROM scratch
 
-COPY --from=build /usr/local/bin/ipfs-proxy /usr/local/bin/ipfs-proxy
+COPY --from=build /ipfs-proxy/ipfs-proxy /ipfs-proxy
 
 EXPOSE 8089
 
 ENTRYPOINT []
-CMD ["ipfs-proxy"]
+CMD ["/ipfs-proxy"]

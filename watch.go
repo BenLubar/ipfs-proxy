@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/BenLubar/ipfs-proxy/fanotify"
+	"bitbucket.org/madmo/fanotify"
 )
 
 func watch() {

@@ -3,15 +3,22 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
+	"io"
+	"io/ioutil"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
+
+	"github.com/pkg/errors"
 )
 
+var flagAPIEndpoint = flag.String("api", "http://daemon:5001", "the IPFS API endpoint")
 var flagBaseURL = flag.String("baseurl", "https://ipfs.io", "base IPFS server URL")
 var flagBaseDir = flag.String("basedir", "/data", "base directory for files")
 var flagWatch = flag.Bool("watch", true, "use -watch=false to disable fanotify support")
@@ -78,20 +85,67 @@ func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
 }
 
 func addFileToIPFS(absPath string) (string, error) {
-	cmd := exec.Command("ipfs", "--api", "/dns4/daemon/tcp/5001", "add", "-Q", "--nocopy", "--fscache", "--inline", absPath)
-	cmd.Stderr = os.Stderr
-	b, err := cmd.Output()
+	var buf bytes.Buffer
+	mimeType, err := writeMultipartBody(&buf, absPath)
 	if err != nil {
 		return "", err
 	}
-	hash := strings.TrimSpace(string(b))
-	if err = syscall.Setxattr(absPath, "user.ipfs-hash", []byte(b), 0); err != nil {
+
+	resp, err := http.Post(*flagAPIEndpoint+"/api/v0/add?"+url.Values{
+		"arg":     {absPath},
+		"fscache": {"true"},
+		"quieter": {"true"},
+		"nocopy":  {"true"},
+	}.Encode(), mimeType, &buf)
+	if err != nil {
 		return "", err
 	}
-	return hash, nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := ioutil.ReadAll(resp.Body)
+		return "", errors.Errorf("%s: %q", resp.Status, b)
+	}
+
+	var data struct {
+		Hash string
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&data)
+	if err != nil {
+		return "", err
+	}
+
+	if err = syscall.Setxattr(absPath, "user.ipfs-hash", []byte(data.Hash), 0); err != nil {
+		return "", err
+	}
+	return data.Hash, nil
 }
 
 func notFound(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Cache-Control", "public, max-age=0, stale-while-revalidate=300")
 	http.NotFound(w, r)
+}
+
+func writeMultipartBody(w io.Writer, absPath string) (mimeType string, err error) {
+	data := multipart.NewWriter(w)
+	w, err = data.CreateFormFile("file", absPath)
+	if err != nil {
+		return
+	}
+	f, err := os.Open(absPath)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if e := f.Close(); err == nil {
+			err = e
+		}
+	}()
+
+	_, err = io.Copy(w, f)
+	if err != nil {
+		return
+	}
+
+	return data.FormDataContentType(), data.Close()
 }
