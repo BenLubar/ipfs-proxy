@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -73,7 +74,7 @@ func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
 		return
 	}
 
-	hash, err := addFileToIPFS(absPath)
+	hash, err := addFileToIPFS(r.Context(), absPath)
 	if err != nil {
 		w.Header().Add("Cache-Control", "private, max-age=0, stale-while-revalidate=300")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -84,33 +85,54 @@ func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
 	http.Redirect(w, r, *flagBaseURL+"/ipfs/"+hash, http.StatusMovedPermanently)
 }
 
-func addFileToIPFS(absPath string) (string, error) {
+func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 	var buf bytes.Buffer
 	mimeType, err := writeMultipartBody(&buf, absPath)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := http.Post(*flagAPIEndpoint+"/api/v0/add?"+url.Values{
+	req, err := http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/add?"+url.Values{
 		"arg":     {absPath},
-		"fscache": {"true"},
 		"quieter": {"true"},
-		"nocopy":  {"true"},
-	}.Encode(), mimeType, &buf)
+	}.Encode(), &buf)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := ioutil.ReadAll(resp.Body)
-		return "", errors.Errorf("%s: %q", resp.Status, b)
-	}
+	req.Header.Set("Content-Type", mimeType)
+	ctx2, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx2)
 
 	var data struct {
 		Hash string
 	}
 
-	err = json.NewDecoder(resp.Body).Decode(&data)
+	errch := make(chan error, 2)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			errch <- err
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := ioutil.ReadAll(resp.Body)
+			errch <- errors.Errorf("%s: %q", resp.Status, b)
+			return
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(&data)
+		errch <- err
+	}()
+
+	select {
+	case err = <-errch:
+	case <-ctx.Done():
+		cancel()
+		err = ctx.Err()
+	}
+
 	if err != nil {
 		return "", err
 	}
