@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func watch() {
 		}
 
 		if strings.HasPrefix(name, "/data/") && !strings.HasPrefix(name, "/data/ipfs/") {
-			go addFileToIPFS(name)
+			go addFileToIPFS(context.TODO(), name)
 		}
 	}
 }
@@ -51,7 +52,7 @@ func bootstrap(root string) {
 		go func() {
 			defer wg.Done()
 			for path := range ch {
-				hash, err := addFileToIPFS(path)
+				hash, err := addFileToIPFS(context.TODO(), path)
 				log.Printf("bootstrapping %q: %v %v", path, hash, err)
 			}
 		}()
