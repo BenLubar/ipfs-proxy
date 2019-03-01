@@ -58,7 +58,9 @@ func serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Add("Cache-Control", "public, max-age=31536000, immutable")
-	http.Redirect(w, r, *flagBaseURL+"/ipfs/"+string(hash[:sz]), http.StatusMovedPermanently)
+	ipfsPath := "/ipfs/" + string(hash[:sz])
+	w.Header().Add("X-Ipfs-Path", ipfsPath)
+	http.Redirect(w, r, *flagBaseURL+ipfsPath, http.StatusMovedPermanently)
 }
 
 func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
@@ -82,7 +84,9 @@ func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
 	}
 
 	w.Header().Add("Cache-Control", "public, max-age=31536000, immutable")
-	http.Redirect(w, r, *flagBaseURL+"/ipfs/"+hash, http.StatusMovedPermanently)
+	ipfsPath := "/ipfs/" + hash
+	w.Header().Add("X-Ipfs-Path", ipfsPath)
+	http.Redirect(w, r, *flagBaseURL+ipfsPath, http.StatusMovedPermanently)
 }
 
 func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
@@ -92,17 +96,27 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/add?"+url.Values{
-		"arg":     {absPath},
-		"quieter": {"true"},
+	req, err := http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/files/write?"+url.Values{
+		"arg":        {absPath, absPath},
+		"raw-leaves": {"true"},
+		"create":     {"true"},
+		"parents":    {"true"},
+		"truncate":   {"true"},
 	}.Encode(), &buf)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", mimeType)
+	req2, err := http.NewRequest("GET", *flagAPIEndpoint+"/api/v0/files/stat?"+url.Values{
+		"arg": {absPath},
+	}.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
 	ctx2, cancel := context.WithCancel(req.Context())
 	defer cancel()
 	req = req.WithContext(ctx2)
+	req2 = req2.WithContext(ctx2)
 
 	var data struct {
 		Hash string
@@ -115,13 +129,24 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 			errch <- err
 			return
 		}
-		defer resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := ioutil.ReadAll(resp.Body)
 			errch <- errors.Errorf("%s: %q", resp.Status, b)
 			return
 		}
 
+		resp, err = http.DefaultClient.Do(req2)
+		if err != nil {
+			errch <- err
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := ioutil.ReadAll(resp.Body)
+			errch <- errors.Errorf("%s: %q", resp.Status, b)
+			return
+		}
 		err = json.NewDecoder(resp.Body).Decode(&data)
 		errch <- err
 	}()
