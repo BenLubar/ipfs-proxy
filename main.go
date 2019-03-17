@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,7 +22,7 @@ import (
 )
 
 var flagAPIEndpoint = flag.String("api", "http://daemon:5001", "the IPFS API endpoint")
-var flagBaseURL = flag.String("baseurl", "https://ipfs.io", "base IPFS server URL")
+var flagBaseURL = flag.String("baseurl", "https://gateway.ipfs.io", "base IPFS server URL")
 var flagBaseDir = flag.String("basedir", "/data", "base directory for files")
 var flagWatch = flag.Bool("watch", true, "use -watch=false to disable fanotify support")
 var flagBootstrap = flag.String("bootstrap", "", "bootstrap ipfs from files in this directory tree instead of running a proxy")
@@ -97,11 +99,10 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 	}
 
 	req, err := http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/files/write?"+url.Values{
-		"arg":        {absPath, absPath},
-		"raw-leaves": {"true"},
-		"create":     {"true"},
-		"parents":    {"true"},
-		"truncate":   {"true"},
+		"arg":      {absPath},
+		"create":   {"true"},
+		"parents":  {"true"},
+		"truncate": {"true"},
 	}.Encode(), &buf)
 	if err != nil {
 		return "", err
@@ -129,12 +130,13 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 			errch <- err
 			return
 		}
-		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := ioutil.ReadAll(resp.Body)
-			errch <- errors.Errorf("%s: %q", resp.Status, b)
+			errch <- errors.Errorf("write: %s: %q", resp.Status, b)
+			_ = resp.Body.Close()
 			return
 		}
+		_ = resp.Body.Close()
 
 		resp, err = http.DefaultClient.Do(req2)
 		if err != nil {
@@ -144,7 +146,7 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := ioutil.ReadAll(resp.Body)
-			errch <- errors.Errorf("%s: %q", resp.Status, b)
+			errch <- errors.Errorf("stat: %s: %q", resp.Status, b)
 			return
 		}
 		err = json.NewDecoder(resp.Body).Decode(&data)
@@ -175,7 +177,11 @@ func notFound(w http.ResponseWriter, r *http.Request) {
 
 func writeMultipartBody(w io.Writer, absPath string) (mimeType string, err error) {
 	data := multipart.NewWriter(w)
-	w, err = data.CreateFormFile("file", absPath)
+	w, err = data.CreatePart(textproto.MIMEHeader{
+		"Abspath":             {absPath},
+		"Content-Disposition": {fmt.Sprintf("file; filename=%q", filepath.Base(absPath))},
+		"Content-Type":        {"application/octet-stream"},
+	})
 	if err != nil {
 		return
 	}
