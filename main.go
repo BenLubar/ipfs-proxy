@@ -9,16 +9,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"syscall"
-
-	"github.com/pkg/errors"
 )
 
 var flagAPIEndpoint = flag.String("api", "http://daemon:5001", "the IPFS API endpoint")
@@ -26,6 +24,8 @@ var flagBaseURL = flag.String("baseurl", "https://gateway.ipfs.io", "base IPFS s
 var flagBaseDir = flag.String("basedir", "/data", "base directory for files")
 var flagWatch = flag.Bool("watch", true, "use -watch=false to disable fanotify support")
 var flagBootstrap = flag.String("bootstrap", "", "bootstrap ipfs from files in this directory tree instead of running a proxy")
+var flagCacheHit = flag.String("cache-hit", "public, max-age=31536000, immutable", "cache-control header for success")
+var flagCacheMiss = flag.String("cache-miss", "private, max-age=0, stale-while-revalidate=300", "cache-control header for errors")
 
 func main() {
 	flag.Parse()
@@ -59,7 +59,7 @@ func serveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Add("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Add("Cache-Control", *flagCacheHit)
 	ipfsPath := "/ipfs/" + string(hash[:sz])
 	w.Header().Add("X-Ipfs-Path", ipfsPath)
 	http.Redirect(w, r, *flagBaseURL+ipfsPath, http.StatusMovedPermanently)
@@ -68,7 +68,7 @@ func serveFile(w http.ResponseWriter, r *http.Request) {
 func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
 	fi, err := os.Stat(absPath)
 	if err != nil {
-		w.Header().Add("Cache-Control", "private, max-age=0, stale-while-revalidate=300")
+		w.Header().Add("Cache-Control", *flagCacheMiss)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -80,12 +80,12 @@ func addAndServeFile(w http.ResponseWriter, r *http.Request, absPath string) {
 
 	hash, err := addFileToIPFS(r.Context(), absPath)
 	if err != nil {
-		w.Header().Add("Cache-Control", "private, max-age=0, stale-while-revalidate=300")
+		w.Header().Add("Cache-Control", *flagCacheMiss)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Add("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Add("Cache-Control", *flagCacheHit)
 	ipfsPath := "/ipfs/" + hash
 	w.Header().Add("X-Ipfs-Path", ipfsPath)
 	http.Redirect(w, r, *flagBaseURL+ipfsPath, http.StatusMovedPermanently)
@@ -98,71 +98,55 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/files/write?"+url.Values{
-		"arg":      {absPath},
-		"create":   {"true"},
-		"parents":  {"true"},
-		"truncate": {"true"},
+	req, err := http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/add?"+url.Values{
+		"pin": {"false"},
 	}.Encode(), &buf)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", mimeType)
-	req2, err := http.NewRequest("GET", *flagAPIEndpoint+"/api/v0/files/stat?"+url.Values{
-		"arg": {absPath},
+	req = req.WithContext(ctx)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	var data struct {
+		Hash string
+	}
+	err = json.NewDecoder(resp.Body).Decode(&data)
+	_ = resp.Body.Close()
+	if err != nil {
+		return "", err
+	}
+
+	req, err = http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/files/mkdir?"+url.Values{
+		"arg":     {path.Dir(absPath)},
+		"parents": {"true"},
+		"flush":   {"false"},
 	}.Encode(), nil)
 	if err != nil {
 		return "", err
 	}
-	ctx2, cancel := context.WithCancel(req.Context())
-	defer cancel()
-	req = req.WithContext(ctx2)
-	req2 = req2.WithContext(ctx2)
-
-	var data struct {
-		Hash string
-	}
-
-	errch := make(chan error, 2)
-	go func() {
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			errch <- err
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			b, _ := ioutil.ReadAll(resp.Body)
-			errch <- errors.Errorf("write: %s: %q", resp.Status, b)
-			_ = resp.Body.Close()
-			return
-		}
-		_ = resp.Body.Close()
-
-		resp, err = http.DefaultClient.Do(req2)
-		if err != nil {
-			errch <- err
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			b, _ := ioutil.ReadAll(resp.Body)
-			errch <- errors.Errorf("stat: %s: %q", resp.Status, b)
-			return
-		}
-		err = json.NewDecoder(resp.Body).Decode(&data)
-		errch <- err
-	}()
-
-	select {
-	case err = <-errch:
-	case <-ctx.Done():
-		cancel()
-		err = ctx.Err()
-	}
-
+	req = req.WithContext(ctx)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
+	_ = resp.Body.Close()
+
+	req, err = http.NewRequest("POST", *flagAPIEndpoint+"/api/v0/files/cp?"+url.Values{
+		"arg": {"/ipfs/" + data.Hash, absPath},
+	}.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	req = req.WithContext(ctx)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	_ = resp.Body.Close()
 
 	if err = syscall.Setxattr(absPath, "user.ipfs-hash", []byte(data.Hash), 0); err != nil {
 		return "", err
@@ -171,7 +155,7 @@ func addFileToIPFS(ctx context.Context, absPath string) (string, error) {
 }
 
 func notFound(w http.ResponseWriter, r *http.Request) {
-	w.Header().Add("Cache-Control", "public, max-age=0, stale-while-revalidate=300")
+	w.Header().Add("Cache-Control", *flagCacheMiss)
 	http.NotFound(w, r)
 }
 
