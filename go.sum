@@ -2,3 +2,4 @@ bitbucket.org/madmo/fanotify v0.0.0-20120706135921-200ee16b72ad h1:pCWErjloWt+E0
 bitbucket.org/madmo/fanotify v0.0.0-20120706135921-200ee16b72ad/go.mod h1:09uYXXaJha/3/oMv42Ya3t4QISGaVPUzjkKDPPJAMP0=
 github.com/pkg/errors v0.8.1 h1:iURUrRGxPUNPdy5/HRSm+Yj6okJ6UtLINN0Q9M4+h3I=
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
